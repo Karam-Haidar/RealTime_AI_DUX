@@ -44,15 +44,15 @@ API_KEY = os.getenv("OPENAI_API_KEY")
 URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini-2025-10-06"
 
 SAMPLE_RATE = 16000
-CHUNK_DURATION = 0.05
+CHUNK_DURATION = 0.08
 CHUNK = int(SAMPLE_RATE * CHUNK_DURATION)
 
 # =======================
 # VOICE ACTIVATION PARAMETERS
 # =======================
-VOICE_THRESHOLD = 0.015   # Adjust this based on your microphone sensitivity
-SILENCE_DURATION = 1.0    # Seconds of silence to stop recording
-MIN_SPEECH_DURATION = 0.5  # Minimum speech duration to consider valid
+VOICE_THRESHOLD = 0.025 # Adjust this based on your microphone sensitivity
+SILENCE_DURATION = 1.4    # Seconds of silence to stop recording
+MIN_SPEECH_DURATION = 0.7  # Minimum speech duration to consider valid
 
 # =======================
 # GLOBAL STATE
@@ -330,9 +330,9 @@ def arc_say(text: str, streaming=False):
 # MUSIC (FIXED)
 # =======================
 MUSIC_PATHS = {
-    "mozart":    r"F:\EZ-Robot\real_time_ai\mozart.mp3",
-    "beethoven": r"F:\EZ-Robot\real_time_ai\beethoven.mp3",
-    "vivaldi":   r"F:\EZ-Robot\real_time_ai\vivaldi.mp3",
+    "mozart":    r"F:\EZ-Robot\Dux_Real-Time_Ai\vivaldi.mp3",
+    "beethoven": r"F:\EZ-Robot\Dux_Real-Time_Ai\beethoven.mp3",
+    "vivaldi":   r"F:\EZ-Robot\Dux_Real-Time_Ai\vivaldi.mp3",
 }
 
 music_process = None
