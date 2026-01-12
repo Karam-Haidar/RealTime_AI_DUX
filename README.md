@@ -5,6 +5,7 @@ Before running the main file, you MUST have:
 A local fine-tuned QA model folder
 
 A local ChromaDB database folder
+here is the link in google driver to download the above files ""
 
 A valid OpenAI API key
 
@@ -14,7 +15,7 @@ If any of these are missing, the program will not run.
 
 project_root/
 │
-├── main_With_button.py          # Main program (this file)
+├── main.py          # Main program (this file)
 │
 ├── neu_faculty_qa_model/        # ✅ REQUIRED
 │   ├── config.json
