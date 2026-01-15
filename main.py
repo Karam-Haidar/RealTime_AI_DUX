@@ -1,5 +1,5 @@
-import asyncio
 import websockets
+import asyncio 
 import sounddevice as sd
 import numpy as np
 import base64
@@ -76,652 +76,213 @@ print("i am here 1")
 # ============================================================
 # ENHANCED RAG SYSTEM WITH FUZZY MATCHING
 # ============================================================
+def parse_chromadb_router(text: str):
+    """
+    Extracts query from:
+    GETTING_INFO_FROM_CHROMADB_(...)
+    """
+    m = re.match(r"GETTING_INFO_FROM_CHROMADB_\((.+)\)", text.strip())
+    if m:
+        return m.group(1).strip()
+    return None
+def build_combined_db_query(router_query: str, transcript: str) -> str:
+    """
+    Combine router query + transcript for better recall.
+    Router query = intent
+    Transcript = noisy evidence
+    """
+    parts = []
+    if router_query:
+        parts.append(router_query.strip())
+    if transcript:
+        parts.append(transcript.strip())
 
-class EnhancedFacultyRAGSystem:
-    """Enhanced RAG system with fuzzy name matching and better extraction."""
-    
-    def __init__(self):
-        """Initialize enhanced RAG system."""
-        print("Initializing Enhanced RAG System...")
-        
-        # Load QA model
-        print(f"Loading QA model from: {CONFIG['model_path']}")
-        self.tokenizer = AutoTokenizer.from_pretrained(CONFIG["model_path"])
-        self.model = AutoModelForQuestionAnswering.from_pretrained(CONFIG["model_path"])
-        self.model.eval()
-        print("Model loaded successfully")
-        
-        # Initialize ChromaDB
-        print(f"Connecting to ChromaDB: {CONFIG['chromadb_path']}")
-        self.client = chromadb.PersistentClient(path=CONFIG["chromadb_path"])
-        self.collection = self.client.get_collection(CONFIG["collection_name"])
-        total_docs = self.collection.count()
-        print(f"ChromaDB connected. Documents: {total_docs}")
-        
-        # Pre-load all faculty names and metadata for fuzzy matching
-        self.all_faculty_names = []
-        self.all_faculty_data = []  # Store name + metadata
-        self._load_all_faculty_data()
-        print(f"Loaded {len(self.all_faculty_names)} faculty names for fuzzy matching")
-        
-        # Device setup
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
-        print(f"Device: {self.device}")
-    
-    def _load_all_faculty_data(self):
-        """Load all faculty names and metadata from ChromaDB."""
-        try:
-            # Get all documents with metadata
-            all_docs = self.collection.get(include=["metadatas"])
-            self.all_faculty_names = []
-            self.all_faculty_data = []
-            
-            if all_docs and "metadatas" in all_docs and all_docs["metadatas"]:
-                for metadata in all_docs["metadatas"]:
-                    if metadata and "name" in metadata:
-                        name = metadata["name"].strip()
-                        if name and name not in self.all_faculty_names:
-                            self.all_faculty_names.append(name)
-                            self.all_faculty_data.append({
-                                "name": name,
-                                "name_lower": name.lower(),
-                                "name_words": name.lower().split(),
-                                "metadata": metadata
-                            })
-            
-            # Also create variations for better matching
-            self._create_name_variations()
-            
-        except Exception as e:
-            print(f"Warning: Could not load faculty data: {e}")
-    
-    def _create_name_variations(self):
-        """Create name variations for better fuzzy matching."""
-        name_variations = []
-        
-        for faculty in self.all_faculty_data:
-            name = faculty["name"]
-            name_lower = faculty["name_lower"]
-            
-            # Extract first name and last name
-            parts = name_lower.split()
-            if len(parts) >= 2:
-                # First name only
-                first_name = parts[0]
-                if first_name not in name_variations:
-                    name_variations.append(first_name)
-                    self.all_faculty_data.append({
-                        "name": name,
-                        "name_lower": first_name,
-                        "name_words": [first_name],
-                        "metadata": faculty["metadata"],
-                        "is_variation": True
-                    })
-                
-                # Last name only
-                last_name = parts[-1]
-                if last_name not in name_variations:
-                    name_variations.append(last_name)
-                    self.all_faculty_data.append({
-                        "name": name,
-                        "name_lower": last_name,
-                        "name_words": [last_name],
-                        "metadata": faculty["metadata"],
-                        "is_variation": True
-                    })
-    
-    def _correct_spelling(self, text: str) -> str:
-        """Correct common spelling mistakes in the query."""
-        if not CONFIG.get("spell_corrections"):
-            return text
-        
-        corrected = text.lower()
-        for wrong, correct in CONFIG["spell_corrections"].items():
-            if wrong in corrected:
-                corrected = corrected.replace(wrong, correct)
-        
-        # Only return corrected version if it's actually different
-        if corrected != text.lower():
-            return corrected
-        return text
-    
-    def find_closest_name(self, query: str) -> Tuple[Optional[str], int, Optional[Dict]]:
-        """
-        Find the closest matching faculty name using multiple matching strategies.
-        Returns (matched_name, match_score, matched_metadata) or (None, 0, None).
-        """
-        if not self.all_faculty_data:
-            return None, 0, None
-        
-        original_query = query
-        query = self._correct_spelling(query)
-        
-        if CONFIG["enable_debug"]:
-            print(f"🔍 Name matching: '{original_query}' -> '{query}'")
-        
-        # Strategy 1: Direct substring match
-        for faculty in self.all_faculty_data:
-            if faculty["name_lower"] in query or query in faculty["name_lower"]:
-                if CONFIG["enable_debug"]:
-                    print(f"  ✓ Direct substring match: '{faculty['name']}'")
-                return faculty["name"], 100, faculty["metadata"]
-        
-        # Strategy 2: Extract potential names from query
-        potential_names = self._extract_name_candidates(query)
-        
-        # Strategy 3: Word overlap matching
-        query_words = set(re.findall(r'\b\w+\b', query.lower()))
-        
-        best_match = None
-        best_score = 0
-        best_metadata = None
-        
-        for faculty in self.all_faculty_data:
-            score = 0
-            
-            # Check word overlap
-            name_words = set(faculty["name_words"])
-            overlap = query_words.intersection(name_words)
-            if overlap:
-                score = len(overlap) * 30  # 30 points per overlapping word
-            
-            # Check for partial name matches
-            for q_word in query_words:
-                for n_word in faculty["name_words"]:
-                    if len(q_word) > 2 and len(n_word) > 2:
-                        if q_word in n_word or n_word in q_word:
-                            score += 20
-                        elif fuzz.ratio(q_word, n_word) > 80:
-                            score += 15
-            
-            # Check extracted potential names
-            for pot_name in potential_names:
-                if pot_name.lower() in faculty["name_lower"] or faculty["name_lower"] in pot_name.lower():
-                    score += 40
-            
-            # Use fuzzy matching as fallback
-            if score < 50:  # Only use fuzzy if other methods didn't find good match
-                fuzzy_score = fuzz.partial_ratio(query, faculty["name_lower"])
-                if fuzzy_score > best_score:
-                    score = max(score, fuzzy_score * 0.8)  # Weight fuzzy matches slightly lower
-            
-            if score > best_score and score >= 40:  # Minimum threshold
-                best_score = score
-                best_match = faculty["name"]
-                best_metadata = faculty["metadata"]
-        
-        if best_match and best_score >= CONFIG["fuzzy_match_threshold"]:
-            if CONFIG["enable_debug"]:
-                print(f"  ✓ Best match found: '{best_match}' (score: {best_score})")
-            return best_match, best_score, best_metadata
-        
-        if CONFIG["enable_debug"]:
-            print(f"  ✗ No good match found (best score: {best_score})")
-        return None, 0, None
-    
-    def _extract_name_candidates(self, query: str) -> List[str]:
-        """Extract potential name candidates from query."""
-        candidates = []
-        
-        # Remove common titles and words
-        stop_words = {"prof", "dr", "professor", "doctor", "room", "office", "background", 
-                     "education", "degree", "qualification", "where", "what", "is", "the", 
-                     "of", "for", "and", "to", "in", "at"}
-        
-        words = re.findall(r'\b\w+\b', query.lower())
-        filtered_words = [w for w in words if w not in stop_words and len(w) > 2]
-        
-        # Create combinations of filtered words
-        if len(filtered_words) >= 2:
-            candidates.append(' '.join(filtered_words))
-        
-        # Add individual words that might be names
-        for word in filtered_words:
-            if word[0].isupper() or len(word) > 3:
-                candidates.append(word)
-        
-        return candidates
-    
-    def retrieve_with_name_focus(self, query: str, matched_name: str = None, matched_metadata: Dict = None) -> List[Dict]:
-        """
-        Enhanced retrieval that focuses on name matching with multiple strategies.
-        """
-        contexts = []
-        
-        try:
-            # STRATEGY 1: Direct metadata filtering (if we have matched name)
-            if matched_name:
-                if CONFIG["enable_debug"]:
-                    print(f"  📂 Searching for exact name: '{matched_name}'")
-                
-                try:
-                    # Try exact match first
-                    exact_results = self.collection.get(
-                        where={"name": {"$eq": matched_name}}
-                    )
-                    
-                    if exact_results and exact_results["documents"]:
-                        for doc, meta in zip(exact_results["documents"], exact_results["metadatas"]):
-                            contexts.append({
-                                "text": doc,
-                                "metadata": meta,
-                                "distance": 0.0,
-                                "relevance": 2.0,  # High relevance for exact match
-                                "name_match": True,
-                                "source": "exact_name_filter"
-                            })
-                            if CONFIG["enable_debug"]:
-                                print(f"    ✓ Found {len(exact_results['documents'])} exact matches")
-                except Exception as e:
-                    if CONFIG["enable_debug"]:
-                        print(f"    Note: Exact filter failed: {e}")
-            
-            # STRATEGY 2: Semantic search with the query
-            if CONFIG["enable_debug"]:
-                print(f"  🔍 Semantic search for: '{query}'")
-            
-            semantic_results = self.collection.query(
-                query_texts=[query],
-                n_results=CONFIG["n_retrieve"],
-                include=["documents", "metadatas", "distances"]
-            )
-            
-            if semantic_results["documents"] and semantic_results["documents"][0]:
-                for doc, meta, dist in zip(
-                    semantic_results["documents"][0],
-                    semantic_results["metadatas"][0],
-                    semantic_results["distances"][0]
-                ):
-                    # Skip if already in contexts
-                    if any(ctx["text"] == doc for ctx in contexts):
-                        continue
-                    
-                    relevance = 1.0 / (1.0 + float(dist))
-                    
-                    # Boost if name matches
-                    name_match = False
-                    if matched_name:
-                        meta_name = meta.get("name", "").lower() if meta else ""
-                        if matched_name.lower() in meta_name or meta_name in matched_name.lower():
-                            relevance *= 1.8
-                            name_match = True
-                    
-                    contexts.append({
-                        "text": doc,
-                        "metadata": meta,
-                        "distance": float(dist),
-                        "relevance": relevance,
-                        "name_match": name_match,
-                        "source": "semantic_search"
-                    })
-                
-                if CONFIG["enable_debug"]:
-                    print(f"    ✓ Found {len(semantic_results['documents'][0])} semantic matches")
-            
-            # STRATEGY 3: If still not enough, search with name only
-            if matched_name and len(contexts) < 3:
-                if CONFIG["enable_debug"]:
-                    print(f"  🔍 Additional search with name only: '{matched_name}'")
-                
-                name_only_results = self.collection.query(
-                    query_texts=[matched_name],
-                    n_results=3,
-                    include=["documents", "metadatas", "distances"]
-                )
-                
-                if name_only_results["documents"] and name_only_results["documents"][0]:
-                    for doc, meta, dist in zip(
-                        name_only_results["documents"][0],
-                        name_only_results["metadatas"][0],
-                        name_only_results["distances"][0]
-                    ):
-                        # Skip if already in contexts
-                        if any(ctx["text"] == doc for ctx in contexts):
-                            continue
-                        
-                        relevance = 1.0 / (1.0 + float(dist)) * 1.5  # Boost for name search
-                        
-                        contexts.append({
-                            "text": doc,
-                            "metadata": meta,
-                            "distance": float(dist),
-                            "relevance": relevance,
-                            "name_match": True,
-                            "source": "name_only_search"
-                        })
-            
-            # Remove duplicates and sort by relevance
-            unique_contexts = []
-            seen_texts = set()
-            
-            for ctx in contexts:
-                if ctx["text"] not in seen_texts:
-                    seen_texts.add(ctx["text"])
-                    unique_contexts.append(ctx)
-            
-            # Sort by relevance (highest first)
-            unique_contexts.sort(key=lambda x: x["relevance"], reverse=True)
+    # Deduplicate words roughly
+    combined = " | ".join(dict.fromkeys(parts))
+    return combined
 
-            # 🔥 TAKE ONLY THE BEST MATCH
-            best_context = unique_contexts[0] if unique_contexts else None
+import re
+import unicodedata
+import chromadb
+from difflib import SequenceMatcher
 
-            if CONFIG["enable_debug"] and best_context:
-                name = best_context["metadata"].get("name", "Unknown")
-                print(f"  🏆 Selected BEST context: {name} (rel: {best_context['relevance']:.2f})")
+# =====================================================
+# CONFIG
+# =====================================================
+DB_PATH = "./faculty_chromadb"
+COLLECTION_NAME = "faculty_names"
+TOP_K = 15
 
-            return [best_context] if best_context else []
+# =====================================================
+# CONSTANTS
+# =====================================================
+TITLES = {
+    "professor", "prof", "dr", "assoc", "associate",
+    "assistant", "asst", "mr", "ms", "mrs"
+}
 
-            
-        except Exception as e:
-            print(f"Error in retrieval: {e}")
-            if CONFIG["enable_debug"]:
-                import traceback
-                traceback.print_exc()
-            return []
-    
-    def extract_better_answer(self, question: str, context: str) -> Tuple[str, float]:
-        """
-        Enhanced answer extraction with better post-processing.
-        """
-        if not context or not question:
-            return "", 0.0
-        
-        try:
-            # Prepare input for the model
-            inputs = self.tokenizer(
-                question,
-                context,
-                max_length=384,
-                truncation=True,
-                padding="max_length",
-                return_tensors="pt"
-            )
+STOPWORDS = {
+    "where", "is", "the", "room", "office", "for", "of",
+    "can", "could", "would", "should", "may", "might",
+    "you", "i", "we", "me", "us", "please", "tell",
+    "know", "want", "looking", "find", "give", "show",
+    "about", "to", "in", "on", "at", "with"
+}
 
-            # Move to device
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+# =====================================================
+# TEXT NORMALIZATION
+# =====================================================
+def normalize(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
 
-            
-            # Get model predictions
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            
-            # Find the best answer across all chunks
-            best_answer = ""
-            best_confidence = 0.0
-            best_start_probs = []
-            best_end_probs = []
-            
-            # Process each chunk
-            for i in range(inputs["input_ids"].shape[0]):
-                start_logits = outputs.start_logits[i]
-                end_logits = outputs.end_logits[i]
-                
-                # Get probabilities
-                start_probs = torch.softmax(start_logits, dim=0)
-                end_probs = torch.softmax(end_logits, dim=0)
-                
-                # Get most likely positions
-                start_idx = torch.argmax(start_logits).item()
-                end_idx = torch.argmax(end_logits).item()
-                
-                # Calculate confidence
-                start_conf = start_probs[start_idx].item()
-                end_conf = end_probs[end_idx].item()
-                confidence = (start_conf + end_conf) / 2.0
-                
-                # Get answer tokens
-                answer_tokens = inputs["input_ids"][i][start_idx:end_idx+1]
-                answer = self.tokenizer.decode(answer_tokens, skip_special_tokens=True)
-                
-                # Keep the best answer
-                if confidence > best_confidence:
-                    best_confidence = confidence
-                    best_answer = answer
-                    best_start_probs = start_probs
-                    best_end_probs = end_probs
-            
-            # Enhanced cleaning
-            cleaned_answer = self._enhanced_clean_answer(best_answer, context, question)
-            
-            if CONFIG["enable_debug"]:
-                print(f"  🎯 Extraction confidence: {best_confidence:.2f}")
-                print(f"  📝 Raw answer: '{best_answer}'")
-                print(f"  ✨ Cleaned answer: '{cleaned_answer}'")
-            
-            return cleaned_answer, best_confidence
-            
-        except Exception as e:
-            print(f"Error in answer extraction: {e}")
-            if CONFIG["enable_debug"]:
-                import traceback
-                traceback.print_exc()
-            return "", 0.0
-    
-    def _enhanced_clean_answer(self, answer: str, context: str, question: str) -> str:
-        """
-        Enhanced answer cleaning with context awareness.
-        """
-        if not answer:
-            return ""
-        
-        # Clean the answer
-        answer = answer.strip()
-        
-        # Remove artifacts
-        artifacts = ["[CLS]", "[SEP]", "[PAD]", "##", "\n", "\t", "  "]
-        for art in artifacts:
-            answer = answer.replace(art, " ")
-        
-        # Fix common issues
-        answer = re.sub(r'\s+([.,;!?])', r'\1', answer)  # Remove space before punctuation
-        answer = re.sub(r'([.,;!?])\s+', r'\1 ', answer)  # Add space after punctuation
-        
-        # Fix "303. 0" type issues
-        answer = re.sub(r'(\d+)\.\s+0\b', r'\1', answer)
-        
-        # If answer is too short or doesn't make sense, try to extract from context
-        if len(answer.split()) < 2 or answer.isdigit():
-            question_lower = question.lower()
-            
-            # Try to extract office/room information
-            if "room" in question_lower or "office" in question_lower:
-                room_patterns = [
-                    r'room\s+(\d+[A-Z]?(?:\s*/\s*\d+[A-Z]?)?)',
-                    r'office\s+(\d+[A-Z]?(?:\s*[A-Za-z\s]+)?)',
-                    r'(\d+[A-Z]?)\s*(?:room|office|rm|ofc)',
-                    r'at\s+(\d+[A-Z]?(?:\s*[A-Za-z\s]+)?)',
-                ]
-                
-                for pattern in room_patterns:
-                    match = re.search(pattern, context, re.IGNORECASE)
-                    if match:
-                        room_info = match.group(1).strip()
-                        if len(room_info) > len(answer) or not answer:
-                            answer = f"Room {room_info}"
-                            break
-            
-            # Try to extract background/education information
-            elif "background" in question_lower or "education" in question_lower or "degree" in question_lower:
-                background_patterns = [
-                    r'background[:\s]+([^\.]+\.)',
-                    r'education[:\s]+([^\.]+\.)',
-                    r'degree[:\s]+([^\.]+\.)',
-                    r'ph\.?d\.?\s+in\s+([^\.]+)',
-                    r'master[\'s]?\s+in\s+([^\.]+)',
-                    r'bachelor[\'s]?\s+in\s+([^\.]+)',
-                ]
-                
-                for pattern in background_patterns:
-                    match = re.search(pattern, context, re.IGNORECASE)
-                    if match:
-                        bg_info = match.group(1).strip()
-                        if len(bg_info.split()) > len(answer.split()):
-                            answer = bg_info
-                            break
-        
-        # Final cleanup
-        answer = " ".join(answer.split())  # Normalize whitespace
-        
-        # Ensure proper capitalization for first letter
-        if answer and answer[0].islower():
-            answer = answer[0].upper() + answer[1:]
-        
-        # Add period if missing and it looks like a sentence
-        if answer and len(answer.split()) > 3 and answer[-1] not in '.!?':
-            answer += '.'
-        
-        return answer
-    
-    def generate_direct_answer_from_context(self, contexts: List[Dict], question: str) -> str:
-        """
-        Generate a direct answer from context when extraction fails.
-        """
-        if not contexts:
-            return "I couldn't find any information about that in the faculty database."
-        
-        # Get the most relevant contexts
-        top_contexts = contexts[:1]  # STRICT: only best match
- # Use top 2 for more comprehensive answer
-        
-        # Extract information from all relevant contexts
-        all_names = []
-        all_backgrounds = []
-        all_offices = []
-        
-        for ctx in top_contexts:
-            metadata = ctx.get("metadata", {})
-            
-            if metadata:
-                name = metadata.get("name", "").strip()
-                if name and name not in all_names:
-                    all_names.append(name)
-                
-                background = metadata.get("academic_background", "").strip()
-                if background and background not in all_backgrounds:
-                    all_backgrounds.append(background)
-                
-                office = metadata.get("office", "").strip()
-                if office and office not in all_offices:
-                    all_offices.append(office)
-        
-        question_lower = question.lower()
-        
-        # Generate answer based on question type
-        if "background" in question_lower or "degree" in question_lower or "education" in question_lower:
-            if all_backgrounds:
-                names_str = ", ".join(all_names) if all_names else "The faculty member"
-                backgrounds_str = "; ".join(all_backgrounds)
-                return f"{names_str} has the following academic background: {backgrounds_str}"
-            elif all_names:
-                return f"I found information about {', '.join(all_names)}, but their academic background is not specified in the database."
-            else:
-                return "I couldn't find specific background information for that query."
-        
-        elif "office" in question_lower or "room" in question_lower or "where" in question_lower:
-            if all_offices:
-                names_str = ", ".join(all_names) if all_names else "The faculty member"
-                offices_str = "; ".join(all_offices)
-                return f"{names_str}'s office is located at: {offices_str}"
-            elif all_names:
-                return f"I found information about {', '.join(all_names)}, but their office location is not specified in the database."
-            else:
-                return "I couldn't find specific office information for that query."
-        
-        else:
-            # Generic informative answer
-            parts = []
-            if all_names:
-                parts.append(f"Name(s): {', '.join(all_names)}")
-            if all_backgrounds:
-                parts.append(f"Academic Background: {'; '.join(all_backgrounds)}")
-            if all_offices:
-                parts.append(f"Office(s): {'; '.join(all_offices)}")
-            
-            if parts:
-                return f"Here's what I found: {'; '.join(parts)}."
-            else:
-                return "I found some information, but no specific details are available in the database."
-    
-    def answer_question(self, question: str) -> Dict:
-        """
-        Main function to answer a question with enhanced capabilities.
-        """
-        print(f"\n{'='*60}")
-        print(f"📝 PROCESSING: '{question}'")
-        print(f"{'='*60}")
-        
-        # Step 0: Preprocess question (spelling correction)
-        original_question = question
-        question = self._correct_spelling(question)
-        if question != original_question and CONFIG["enable_debug"]:
-            print(f"  ✏️  Spelling corrected: '{original_question}' -> '{question}'")
-        
-        # Step 1: Find closest name match
-        closest_name, match_score, matched_metadata = self.find_closest_name(question)
-        
-        if closest_name and match_score >= CONFIG["fuzzy_match_threshold"]:
-            print(f"  ✅ Name matched: '{closest_name}' (score: {match_score}%)")
-            enhanced_query = f"{question} {closest_name}"
-        else:
-            closest_name = None
-            matched_metadata = None
-            enhanced_query = question
-            print(f"  ⚠️  No strong name match found")
-        
-        # Step 2: Retrieve with name focus
-        contexts = self.retrieve_with_name_focus(enhanced_query, closest_name, matched_metadata)
-        
-        if not contexts:
-            return {
-                "answer": "I couldn't find any relevant information in the faculty database.",
-                "confidence": 0.0,
-                "matched_name": closest_name,
-                "match_score": match_score if closest_name else 0,
-                "strategy": "no_contexts",
-                "contexts_found": 0,
-                "timestamp": datetime.now().isoformat()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = text.lower()
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+# =====================================================
+# NAME EXTRACTION (STEP 1)
+# =====================================================
+def extract_name(sentence: str) -> str:
+    if not sentence:
+        return ""
+
+    sentence = normalize(sentence)
+
+    # remove punctuation
+    sentence = re.sub(r"[^\w\s]", " ", sentence)
+
+    words = sentence.split()
+
+    candidates = [
+        w for w in words
+        if w not in TITLES
+        and w not in STOPWORDS
+        and len(w) > 1
+        and not w.isdigit()
+    ]
+
+    if len(candidates) >= 2:
+        return " ".join(candidates[-2:])
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    return ""
+
+# =====================================================
+# SIMILARITY
+# =====================================================
+def similarity(a, b):
+    return SequenceMatcher(None, a, b).ratio()
+
+# =====================================================
+# LOAD CHROMADB
+# =====================================================
+client = chromadb.PersistentClient(path=DB_PATH)
+collection = client.get_collection(COLLECTION_NAME)
+
+def compare_ai_vs_transcript(ai_name: str, user_transcript: str) -> dict:
+    """
+    TRUE DOUBLE CHECK:
+    - AI name → direct DB lookup
+    - Transcript → extract_name → DB lookup
+    """
+
+    best_result = {
+        "source": None,
+        "matched_name": None,
+        "confidence": 0.0,
+        "data": None
+    }
+
+    # ✅ 1) AI ROUTER NAME → DIRECT DB SEARCH
+    if ai_name:
+        ai_result = find_person_by_name_only(ai_name)
+        if ai_result["confidence"] > best_result["confidence"]:
+            best_result = {
+                "source": "AI_ROUTER_NAME",
+                "matched_name": ai_result["matched_name"],
+                "confidence": ai_result["confidence"],
+                "data": ai_result["data"]
             }
-        
-        print(f"  📚 Retrieved {len(contexts)} relevant contexts")
-        
-        # Step 3: Try to extract answer from combined context
-        combined_context = contexts[0]["text"]
-        extracted_answer, confidence = self.extract_better_answer(question, combined_context)
-        
-        # Step 4: Determine response strategy
-        if extracted_answer and confidence >= CONFIG["confidence_threshold"]:
-            strategy = "extracted"
-            answer = extracted_answer
-            print(f"  ✅ Answer extracted (confidence: {confidence:.2f})")
-            
-        elif contexts and closest_name:
-            # Use direct generation with matched name
-            strategy = "generated_with_match"
-            answer = self.generate_direct_answer_from_context(contexts, question)
-            print(f"  📝 Generated answer based on matched name")
-            
-        elif contexts:
-            # Use direct generation without name match
-            strategy = "generated"
-            answer = self.generate_direct_answer_from_context(contexts, question)
-            print(f"  📝 Generated answer from retrieved contexts")
-            
-        else:
-            strategy = "no_answer"
-            answer = "I couldn't generate a specific answer based on the available information."
-        
+
+    # ✅ 2) USER TRANSCRIPT → NAME EXTRACTION → DB SEARCH
+    if user_transcript:
+        transcript_result = find_person_by_sentence(user_transcript)
+        if transcript_result["confidence"] > best_result["confidence"]:
+            best_result = {
+                "source": "USER_TRANSCRIPT",
+                "matched_name": transcript_result["matched_name"],
+                "confidence": transcript_result["confidence"],
+                "data": transcript_result["data"]
+            }
+
+    return best_result
+
+
+# =====================================================
+# CHROMADB SEARCH (STEP 2)
+# =====================================================
+def find_person_by_sentence(user_sentence: str):
+    """
+    FULL PIPELINE:
+    Sentence -> extract name -> search ChromaDB -> return best match
+    """
+
+    # 🔹 STEP 1: extract name
+    extracted_name = extract_name(user_sentence)
+
+    if not extracted_name:
         return {
-            "answer": answer,
-            "confidence": confidence,
-            "matched_name": closest_name,
-            "match_score": match_score if closest_name else 0,
-            "strategy": strategy,
-            "contexts_found": len(contexts),
-            "timestamp": datetime.now().isoformat()
+            "extracted_name": "",
+            "matched_name": None,
+            "confidence": 0.0,
+            "data": None
         }
 
-print("i am here 2")
+    query = normalize(extracted_name)
+
+    results = collection.query(
+        query_texts=[query],
+        n_results=TOP_K
+    )
+
+    best_score = -1
+    best_name = None
+    best_meta = None
+
+    for stored_name, meta in zip(
+        results["documents"][0],
+        results["metadatas"][0]
+    ):
+        stored_norm = normalize(stored_name)
+
+        token_score = max(
+            similarity(query, token)
+            for token in stored_norm.split()
+        )
+
+        full_score = similarity(query, stored_norm)
+
+        score = max(token_score, full_score)
+
+        if score > best_score:
+            best_score = score
+            best_name = stored_name
+            best_meta = meta
+
+    return {
+        "extracted_name": extracted_name,
+        "matched_name": best_name,
+        "confidence": round(best_score, 2),
+        "data": best_meta
+    }
+
+
 # ============================================================
 # IMPROVED TERMINAL INTERFACE
 # ============================================================
@@ -835,10 +396,20 @@ Keep your conversations interesting and engaging with the people communicating w
 You are allowed to make clever jokes and use humor to make interactions fun, but always keep it polite and respectful. If someone gives you a funny or silly question, reply with playful humor while staying in character as Professor Dux.
 
 
-* If the user asks about, person, charater, docotor, or professor's backgraund or room "office"
-  (e.g., "tell where is the room for professor fadi ?", who is fadi?, or tell me what you know about ramiz for example),
-  you MUST respond with ONLY the following exact text and nothing else:
-GETTING_INFO_FROM_CHROMADB
+* If the user asks about a person, character, doctor, or professor’s background or room/office
+  (e.g., "where is the room of professor Fadi?", "who is Ramiz?"),
+  you MUST respond with ONLY the following exact format and nothing else:
+
+GETTING_INFO_FROM_CHROMADB_(<PERSON_NAME_ONLY>)
+
+Rules:
+- Output ONLY the person’s name (first name, last name if available).
+- Do NOT include the full question.
+- Do NOT include titles such as Professor, Prof., Dr., Mr., Ms., etc.
+- Correct spelling if the name is misspelled.
+  Example:
+    User says: "yousif"
+    Output: GETTING_INFO_FROM_CHROMADB_(Youssef)
 
 * If the user asks to LEARN or BE TAUGHT the game
   (e.g., "Teach me Rock Paper Scissors", "How do you play?", "I want to learn the game"),
@@ -885,6 +456,47 @@ STOP_TALKING
 # =======================
 # CLEAN TEXT FUNCTION
 # =======================
+
+def find_person_by_name_only(person_name: str):
+    """
+    Direct ChromaDB lookup using a clean name (NO extraction)
+    """
+    if not person_name:
+        return {
+            "matched_name": None,
+            "confidence": 0.0,
+            "data": None
+        }
+
+    query = normalize(person_name)
+
+    results = collection.query(
+        query_texts=[query],
+        n_results=TOP_K
+    )
+
+    best_score = -1
+    best_name = None
+    best_meta = None
+
+    for stored_name, meta in zip(
+        results["documents"][0],
+        results["metadatas"][0]
+    ):
+        stored_norm = normalize(stored_name)
+        score = similarity(query, stored_norm)
+
+        if score > best_score:
+            best_score = score
+            best_name = stored_name
+            best_meta = meta
+
+    return {
+        "matched_name": best_name,
+        "confidence": round(best_score, 2),
+        "data": best_meta
+    }
+
 def clean_ai_text(text: str) -> str:
     if not text:
         return ""
@@ -1033,6 +645,14 @@ def close_mic():
 
 def _which(cmd: str):
     return shutil.which(cmd)
+def reset_query_state():
+    global last_user_transcript
+    global arc_stream_buffer
+    global ai_text_buffer
+
+    last_user_transcript = ""
+    arc_stream_buffer = ""
+    ai_text_buffer = ""
 
 def stop_music():
     global music_process, music_mode
@@ -1106,6 +726,7 @@ def handle_commands(text: str):
     
     if "STOP_TALKING" in clean_text:
         print("🛑 Stopping all speech and movements...")
+        stop_music()
         arc_queue.put(("STOP_ALL", 'controlCommand("Script Collection", "ScriptStopAll");\r\n'))
         arc_queue.put(("STOP_ALL", 'controlCommand("Script Collection", "ScriptStart", "STOP_ALL");\r\n'))
         return True
@@ -1138,41 +759,53 @@ def handle_commands(text: str):
         return True
     
     # 🔥 CRITICAL: Return "CHROMADB" for database queries
-    if "GETTING_INFO_FROM_CHROMADB" in clean_text:
-        return "CHROMADB"
+    router_query = parse_chromadb_router(clean_text)
+    if router_query:
+        return ("CHROMADB", router_query)
+
     
     return None
 
-async def process_chromadb_query(ws, question_for_db: str):
+async def process_chromadb_query(ws, combined_query: str,router_query: str,transcript: str):
     """Process ChromaDB query and send result to OpenAI"""
     try:
-        print(f"📚 Querying ChromaDB for: {question_for_db}")
+        print(f"📚 Querying ChromaDB for: {combined_query}")
         
         # FIX: Initialize ChromaDB here
         try:
         
             # Initialize fresh instance
 
-            response = rag_system.answer_question(question_for_db)
-            
-            # Ensure response is a dict
-            if not isinstance(response, dict):
-                response = {"answer": str(response)}
-                
+            result = compare_ai_vs_transcript(
+                ai_name=router_query,
+                user_transcript=transcript
+            )
+
+            result = compare_ai_vs_transcript(
+                ai_name=router_query,
+                user_transcript=transcript
+            )
+
+            meta = result.get("data") or {}
+
+            details = []
+            for key, value in meta.items():
+                if value and str(value).strip():
+                    details.append(f"{key}: {value}")
+
+            if result.get("matched_name"):
+                db_answer = f"Name: {result['matched_name']}.\n" + "\n".join(details)
+            else:
+                db_answer = "I could not find matching faculty information in the database."
+
+
+    
         except Exception as e:
             print(f"❌ ChromaDB initialization error: {e}")
             import traceback
             traceback.print_exc()
             response = {"answer": "I encountered an error accessing the faculty database."}
         
-        # Extract answer safely
-        db_answer = ""
-        if isinstance(response, dict):
-            db_answer = response.get("answer", "").strip()
-        elif isinstance(response, str):
-            db_answer = response.strip()
-        else:
-            db_answer = str(response).strip()
         
         # Clean any leftover code artifacts
         if any(code_word in db_answer.lower() for code_word in ["import ", "def ", "class ", "print(", "if __name__"]):
@@ -1188,10 +821,26 @@ async def process_chromadb_query(ws, question_for_db: str):
         
         # Create the grounded context
         context_for_ai = f"""
-        User asked: "{question_for_db}"
-        Information from faculty database: "{db_answer}"
-        Please answer the user naturally using this information.
+        You are receiving VERIFIED information from the university faculty database.
+
+        IMPORTANT RULES:
+        - The faculty name and details in the database are AUTHORITATIVE.
+        - Do NOT correct or guess names from user speech.
+        - Use ONLY the name as provided by the database.
+
+        For understanding only (may contain errors):
+        1) Router interpretation:
+        "{router_query}"
+
+        2) Speech transcript:
+        "{transcript}"
+
+        Authoritative database result:
+        "{db_answer}"
+
+        Now respond to the user naturally, using ONLY the database name and facts.
         """.strip()
+
         
         print("📤 Sending DB result back to OpenAI")
         
@@ -1417,7 +1066,7 @@ async def main():
                         if delta:
                             ai_text_buffer += delta
                             arc_stream_buffer += delta
-                            print(delta, end="", flush=True)
+                            #print(delta, end="", flush=True)
 
                     # 🔥 ENHANCED: Capture user transcript
                     if t == "conversation.item.input_audio_transcription.completed":
@@ -1441,8 +1090,23 @@ async def main():
                             # 🔑 Check if this is a command
                             handled = handle_commands(final_text)
                             
-                            if handled == "CHROMADB":
-                                print("🔄 ChromaDB command triggered!")
+                            if isinstance(handled, tuple) and handled[0] == "CHROMADB":
+                                router_query = handled[1]
+                                transcript = last_user_transcript.strip()
+
+                                combined_query = build_combined_db_query(router_query, transcript)
+
+                                print(f"🧠 Combined DB query:\n  - Router: {router_query}\n  - Transcript: {transcript}")
+
+                                success = await process_chromadb_query(
+                                    ws,
+                                    combined_query,
+                                    router_query,
+                                    transcript
+                                )
+                                reset_query_state()
+                                response_in_progress = success
+                                continue
 
                                 # Try to get transcript immediately
                                 question_for_db = last_user_transcript.strip()
@@ -1489,7 +1153,7 @@ if __name__ == "__main__":
         print("🔄 Transcript synchronization system: ACTIVE")
         print("💡 System will wait up to 3 seconds for transcripts when needed")
         print("🧠 Initializing Faculty RAG System...")
-        rag_system = EnhancedFacultyRAGSystem()
+
         print("✅ Faculty RAG ready")
 
         asyncio.run(main())
