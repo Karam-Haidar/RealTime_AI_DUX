@@ -1,50 +1,76 @@
-⚠️ IMPORTANT (READ FIRST)
 
-Before running the main file, you MUST have:
+## ⚠️ IMPORTANT (READ FIRST)
 
-A local fine-tuned QA model folder
+This program **WILL NOT RUN** unless **ALL** requirements below are met.
 
-A local ChromaDB database folder
-here is the link in google driver to download the above files ""
+### ✅ REQUIRED
 
-A valid OpenAI API key
+1. **Local ChromaDB folder**
 
-ARC (Synthiam) running and reachable on TCP
+   * Path (must exist):
 
-If any of these are missing, the program will not run.
+     ```text
+     ./faculty_chromadb/
+     ```
+   * Used for faculty name matching and information retrieval
 
+2. **OpenAI API key**
+
+   * Create a file named `.env` in the project root:
+
+     ```env
+     OPENAI_API_KEY=your_api_key_here
+     ```
+
+3. **Synthiam ARC**
+
+   * Must be running
+   * TCP Script Server enabled
+   * Address:
+
+     ```
+     127.0.0.1 : 8080
+     ```
+
+4. **Working microphone**
+
+   * Required for real-time voice activation
+
+❌ **NO fine-tuned QA model is required**
+❌ **NO local LLM inference is used**
+
+---
+
+## 📁 REQUIRED PROJECT STRUCTURE
+
+```text
 project_root/
 │
-├── main.py          # Main program (this file)
-│
-├── neu_faculty_qa_model/        # ✅ REQUIRED
-│   ├── config.json
-│   ├── pytorch_model.bin
-│   ├── tokenizer.json
-│   ├── tokenizer_config.json
-│   └── vocab.txt
-│
-├── neu_faculty_db/              # ✅ REQUIRED
+├── main.py                  # Main program
+├── faculty_chromadb/         # REQUIRED
 │   ├── chroma.sqlite3
 │   └── index/
 │
-├── .env                         # OpenAI API key
+├── .env                     # REQUIRED
+├── music/                   # REQUIRED (Maestro mode)
+│   ├── mozart.mp3
+│   ├── beethoven.mp3
+│   └── vivaldi.mp3
+│
 └── README.md
+```
 
+Folder names **must NOT be changed**.
 
-///////////////////////////////////////////
+---
+
 
 pip install --upgrade pip
 
-pip install \
-asyncio \
-websockets \
-sounddevice \
-numpy \
-python-dotenv \
-torch \
-transformers \
-sentence-transformers \
-chromadb \
-fuzzywuzzy \
-python-Levenshtein
+
+
+pip install asyncio websockets sounddevice numpy python-dotenv torch \
+transformers sentence-transformers chromadb fuzzywuzzy python-Levenshtein
+
+
+
